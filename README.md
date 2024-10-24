@@ -5,7 +5,9 @@ This repo hosts the code for the morphometric analysis for changes in sub-cortic
 ## Pre-requistes
 
 R >= 4.4.0
+
 RStan 2.32.6 (Stan 2.32.2)
+
 cmdstanr
 
 ## Structure
