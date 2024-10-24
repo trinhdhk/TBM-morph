@@ -5,7 +5,7 @@ This repo hosts the code for the morphometric analysis for changes in sub-cortic
 > [!IMPORTANT]
 > This repository is still under construction
 
-## Pre-requistes
+## Pre-requisites
 
 R >= 4.4.0
 
