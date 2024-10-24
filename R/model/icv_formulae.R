@@ -11,6 +11,13 @@ icv.stanvar = function(model_code, family){
   # likelihood <- gsub('if (!prior_only) {', '', likelihood, fixed=TRUE)
   likelihood <- substr(likelihood, 1, nchar(likelihood)-4)
   
+  lpdf_ <- 
+    brms::stanvar(
+      name='lpdf_',
+      scode=readLines('stan/lpdf_.stan'),
+      block='functions'
+    )
+  
   old_lpdf <- 
     switch(
       family,
@@ -18,7 +25,8 @@ icv.stanvar = function(model_code, family){
       skew_normal = 'target += skew_normal_lpdf(Yl_vol | mu_vol, omega_vol, alpha_vol)',
       t = 'target += student_t_lpdf(Yl_vol | nu_vol, mu_vol, sigma_vol)',
       st = 'for (n in 1:N_vol) {\n      target += constrained_skew_t_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol, lambdap1half_vol, qmhalf_vol);\n    }',
-      sgt = 'for (n in 1:N_vol) {\n      target += sgt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol, lambdap1half_vol, p_vol, q_vol);\n    }'
+      sgt = 'for (n in 1:N_vol) {\n      target += sgt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol, lambdap1half_vol, p_vol, q_vol);\n    }',
+      sym_gt = 'for (n in 1:N_vol) {\n      target += sym_gt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol, p_vol, q_vol);\n    }'
     )
   new_lpdf <-
     switch(
@@ -31,14 +39,15 @@ icv.stanvar = function(model_code, family){
       mu_vol += omega_vol * delta_vol * sqrt(2/pi());',
       t = 'target += student_t_lpdf(Yl_vol[Jobs_vol] | nu_vol, mu_vol[Jobs_vol], sigma_vol);',
       st = 'for (n in Jobs_vol) target += constrained_skew_t_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol, lambdap1half_vol, qmhalf_vol);',
-      sgt = 'for (n in Jobs_vol) target += sgt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol, lambdap1half_vol, p_vol, q_vol);'
+      sgt = 'for (n in Jobs_vol) target += sgt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol, lambdap1half_vol, p_vol, q_vol);',
+      sym_gt = 'target += reduce_sum(partial_sym_gt, to_array_1d(Yl_vol[Jobs_vol]), 1, mu_vol[Jobs_vol], sigma_vol, p_vol, q_vol);'
     )
   
   surv.code <- '
   // mu_evdeath[Jmi_vol] += (bsp_evdeath[1]) * (mu_vol[Jmi_vol]-Yl_vol[Jmi_vol]) ;
   mu_evdeath += bsp_evdeath[1] * (mu_vol-Yl_vol) ;
-  target += bernoulli_logit_glm_lpmf(Y_evdeath | Xc_evdeath, mu_evdeath, b_evdeath);
-  target += std_normal_lpdf(Ymi_vol)'
+  target += bernoulli_logit_glm_lupmf(Y_evdeath | Xc_evdeath, mu_evdeath, b_evdeath);
+  target += std_normal_lupdf(Ymi_vol);'
   likelihood <- gsub('target += bernoulli_logit_glm_lpmf(Y_evdeath | Xc_evdeath, mu_evdeath, b_evdeath);', '', likelihood, fixed=TRUE)
   likelihood <- gsub(old_lpdf, paste(new_lpdf, surv.code, sep='\n'), likelihood, fixed=TRUE)
   likelihood <- gsub('Yl_vol[Jmi_vol] = Ymi_vol', 'Yl_vol[Jmi_vol] = mu_vol[Jmi_vol]', likelihood, fixed=TRUE)
@@ -70,7 +79,7 @@ icv.stanvar = function(model_code, family){
   ll_2 <- '*/' |>  brms::stanvar(name='cancel_out', scode=_, block='likelihood', position='end')
   ll <- likelihood |> brms::stanvar(name='new', scode=_, block='likelihood', position='end')
   
-  c(tdata_code_def, tdata_code_end, ll_1, ll_2, ll)
+  c(tdata_code_def, tdata_code_end, ll_1, ll_2, ll, lpdf_)
 }
 
 gq <- stanvar(
@@ -101,7 +110,9 @@ gq <- stanvar(
 )
 
 # Data -----
-icv <- readRDS('data/imported/clin_vols.RDS') |>
+approx <- 15
+source('R/02_prepare_data.R')
+icv <- clin_vols |>
   filter(grepl('(ventricular)|(entricl)|(Vent)', region)) |>
   mutate(vol = sum(vol), .by=c(timeInt, obj)) |>
   select(-region, -number) |>
@@ -110,7 +121,7 @@ icv <- readRDS('data/imported/clin_vols.RDS') |>
 mu_cd4 <- mean(log2(icv[hiv==TRUE, cd4]), na.rm=TRUE)  
 sd_cd4 <- sd(log2(icv[hiv==TRUE, cd4]), na.rm=TRUE)
 icv <- mutate(icv,
-              # mrc = factor(mrc, levels=1:3, ordered = TRUE),
+              mrc = factor(mrc, levels=1:3, ordered = TRUE),
               muvol = mean(log(vol), na.rm=T),
               sdvol = sd(log(vol), na.rm=T),
               vol = scale(log(vol)) |> as.vector(),
@@ -144,11 +155,12 @@ icv_fml <-
   bf(
     vol | mi() ~ 0+Intercept +
       mri_wk +
-      mo(genotype) + mrc + hiv + 
-      mrc:mri_wk + mo(genotype):mri_wk + arm:mri_wk + hiv:mri_wk + 
-      arm:mrc:mri_wk + arm:mo(genotype):mri_wk + arm:hiv:mri_wk + 
+      mo(genotype) + mo(mrc) + hiv + 
+      mo(mrc):mri_wk + mo(genotype):mri_wk + arm:mri_wk + hiv:mri_wk + 
+      arm:mo(mrc):mri_wk + arm:mo(genotype):mri_wk + arm:hiv:mri_wk + 
+      arm:mo(mrc):hiv:mri_wk + arm:mo(genotype):hiv:mri_wk + 
       # mrc:hiv:mri_wk + arm:mrc:hiv:mri_wk +
-      I(mrc>1):hiv:mri_wk +  arm:I(mrc>1):hiv:mri_wk +
+      # I(mrc>1):hiv:mri_wk +  arm:I(mrc>1):hiv:mri_wk +
       (1|obj)
   )
 

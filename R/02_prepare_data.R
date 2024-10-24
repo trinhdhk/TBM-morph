@@ -2,8 +2,8 @@ library(tidytable)
 library(survival)
 library(discSurv)
 
-if (!exists('approx')) approx <- 10
-cat(approx,  '\n')
+if (!exists('approx')) approx <- 20
+cat('Number of quantiles:', approx+1,  '\n')
 clin <-  readRDS('data/imported/clinical.RDS') |> 
   rename(subject=usubjid) |>
   mutate(tt_death = tt_death/7)
@@ -45,6 +45,7 @@ vols_session <- vols |>
   as_tidytable() |>
   rename(timeInt = timeDisc)
 
+# Join clin and volumetry data in long format
 clin_vols <- 
   left_join(clin_disc_long, vols_session, by=c('subject', 'timeInt')) |>
   dplyr::group_by(obj, timeInt) |>
@@ -66,6 +67,23 @@ clin_vols <-
   left_join(interval_tbl) |>
   mutate(mri_wk = ifelse(is.na(mri_wk), tstart, mri_wk))
 
+# Same as above but in short format
+clin_short_vols <-
+  left_join(clin_disc |> mutate(timeInt=1), 
+            vols_session, by=c('subject', 'timeInt')) |>
+  dplyr::group_by(subject, timeInt) |>
+  dplyr::group_modify(
+    ~ cbind(.x, name = unique(vols$name))
+  ) |>
+  ungroup() |>
+  select(-vol) |>
+  left_join(select(vols, subject, name, number, mri_wk, vol),
+            by = c('subject', 'name', 'mri_wk')) |>
+  rename(region=name) |>
+  left_join(interval_tbl) |>
+  mutate(mri_wk = ifelse(is.na(mri_wk), tstart, mri_wk))
+
 saveRDS(clin_vols, 'data/imported/clin_vols.RDS' )
+saveRDS(clin_short_vols, 'data/imported/clin_vols.RDS' )
 write.csv(clin_vols, 'data/imported/clin_vols.csv', row.names = FALSE)
 

@@ -19,45 +19,39 @@ rv_stanvar = function(model_code, family, n_subject_time){
       block='data'
     )
   
-  surv_y_def <-
-    brms::stanvar(
-      name = 'surv_y_def',
-      block = 'tdata',
-      scode =' array[n_subject_time] int Y_evdeath_subject;',
-      position = 'start'
-    )
-  
-  surv_y_assign <- 
-    brms::stanvar(
-      name='surv_y_assign',
-      block='tdata',
-      position = 'end',
-      scode='
-      for (subject_time in 1:n_subject_time){
-        int i_start = (subject_time - 1)*72 + 1;
-        int i_stop = subject_time*72;
-        Y_evdeath_subject[subject_time] = Y_evdeath[i_start];
-        if (Y_evdeath[i_start] != mean(Y_evdeath[i_start:i_stop])) reject("BUG found!");
-      }
-      '
-    )
-  
   surv_lpmf <- 
     brms::stanvar(
       name='surv_lpmf',
-      scode=readLines('stan/rv_functions.stan'),
+      scode='
+        real surv_lpmf(int[] y, matrix Xc_evdeath, vector mu_evdeath, vector b_evdeath, vector mu_vol, real b_vol, int n_subject_time){
+          real lpmf = 0;
+          vector[n_subject_time] lp_n;
+          array[n_subject_time] int Y_evdeath;
+          for (subject_time in 1:n_subject_time){
+            int n_region = 72;
+            int i_start = (subject_time - 1)*72 + 1;
+            int i_stop = subject_time*72;
+            Y_evdeath[subject_time] = y[i_start];
+            if (y[i_start] != mean( y[i_start:i_stop])) reject("BUG found!");
+            lp_n[subject_time] = sum(mu_evdeath[i_start:i_stop] + Xc_evdeath[i_start:i_stop,:] * b_evdeath)/72;
+            lp_n[subject_time] += b_vol * sum(mu_vol[i_start:i_stop]) / 72;
+          }
+          lpmf += bernoulli_logit_lpmf(Y_evdeath | lp_n);
+          return lpmf;
+        } 
+      ',
       block='functions'
     )
   
   # Add cholesky for correlation
-  # chol_param <- 
-  #   brms::stanvar(
-  #     name='chol_param',
-  #     scode='
-  #     //corr_matrix[N_1] Sigma;
-  #     cholesky_factor_corr[N_1] L_Omega; //correlation matrix of region effect on death',
-  #     block='parameters'
-  #   )
+  chol_param <- 
+    brms::stanvar(
+      name='chol_param',
+      scode='
+      //corr_matrix[N_1] Sigma;
+      cholesky_factor_corr[N_1] L_Omega; //correlation matrix of region effect on death',
+      block='parameters'
+    )
   
   # chol_prior <-
   #   brms::stanvar(
@@ -67,17 +61,17 @@ rv_stanvar = function(model_code, family, n_subject_time){
   #     position='end'
   #   )
   
-  # chol_z1_lpdf <- # Assuming z1 is the random effect of region on survival. 
-  #   brms::stanvar(
-  #     name='chol_z1_lpdf',
-  #     block='model',
-  #     position='end',
-  #     scode='
-  #     //target += lkj_corr_lupdf(Sigma | 4);
-  #     //target += multi_normal_lupdf(z_1[1] | rep_vector(0, N_1), Sigma) - std_normal_lpdf(z_1[1]);
-  #     target += lkj_corr_cholesky_lupdf(L_Omega | 4);
-  #     target += multi_normal_cholesky_lupdf(z_1[1]| rep_vector(0, N_1), L_Omega) - std_normal_lpdf(z_1[1]);'
-  #   )
+  chol_z1_lpdf <- # Assuming z1 is the random effect of region on survival. 
+    brms::stanvar(
+      name='chol_z1_lpdf',
+      block='model',
+      position='end',
+      scode='
+      //target += lkj_corr_lupdf(Sigma | 4);
+      //target += multi_normal_lupdf(z_1[1] | rep_vector(0, N_1), Sigma) - std_normal_lpdf(z_1[1]);
+      target += lkj_corr_cholesky_lupdf(L_Omega | 4);
+      target += multi_normal_cholesky_lupdf(z_1[1]| rep_vector(0, N_1), L_Omega) - std_normal_lpdf(z_1[1]);'
+    )
   
   old_lpdf <- 
     switch(
@@ -85,24 +79,19 @@ rv_stanvar = function(model_code, family, n_subject_time){
       gaussian = 'target += normal_lpdf(Yl_vol | mu_vol, sigma_vol)',
       skew_normal = 'target += skew_normal_lpdf(Yl_vol | mu_vol, omega_vol, alpha_vol)',
       t = 'target += student_t_lpdf(Yl_vol | nu_vol, mu_vol, sigma_vol)',
-      st = 'for (n in 1:N_vol) {\n      target += constrained_skew_t_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], lambdap1half_vol, qmhalf_vol);\n    }',
-      sgt = 'for (n in 1:N_vol) {\n      target += sgt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], lambdap1half_vol, p_vol, q_vol);\n    }',
-      sym_gt = 'for (n in 1:N_vol) {\n      target += sym_gt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], p_vol, q_vol);\n    }'
+      st = 'for (n in 1:N_vol) {\n      target += constrained_skew_t_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], lambdap1half_vol, qmhalf_vol[n]);\n    }',
+      sgt = 'for (n in 1:N_vol) {\n      target += sgt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], lambdap1half_vol, p_vol[n], q_vol[n]);\n    }'
     )
   new_lpdf <-
     switch(
       family,
-      gaussian = 'target += normal_lupdf(Yl_vol[Jobs_vol] | mu_vol[Jobs_vol], sigma_vol[Jobs_vol]);',
+      gaussian = 'target += normal_lpdf(Yl_vol[Jobs_vol] | mu_vol[Jobs_vol], sigma_vol[Jobs_vol]);',
       skew_normal = '
-      target += skew_normal_lupdf(Yl_vol[Jobs_vol] | mu_vol[Jobs_vol], omega_vol[Jobs_vol], alpha_vol);
+      target += skew_normal_lpdf(Yl_vol[Jobs_vol] | mu_vol[Jobs_vol], omega_vol[Jobs_vol], alpha_vol);
       mu_vol += omega_vol * delta_vol * sqrt(2/pi());',
-      t = 'target += student_t_lupdf(Yl_vol[Jobs_vol] | nu_vol, mu_vol[Jobs_vol], sigma_vol[Jobs_vol]);',
-      st = 'target += reduce_sum(partial_skewt, to_array_1d(Yl_vol[Jobs_vol]), 1, mu_vol[Jobs_vol], sigma_vol[Jobs_vol], lambdap1half_vol, qmhalf_vol);',
-      sgt = 'target += reduce_sum(partial_sgt, to_array_1d(Yl_vol[Jobs_vol]), 1, mu_vol[Jobs_vol], sigma_vol[Jobs_vol], lambdap1half_vol, p_vol, q_vol);',
-      sym_gt = 'target += reduce_sum(partial_sym_gt, to_array_1d(Yl_vol[Jobs_vol]), 1,  mu_vol[Jobs_vol], sigma_vol[Jobs_vol], p_vol, q_vol);'
-      # st = 'for (n in Jobs_vol) target += constrained_skew_t_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], lambdap1half_vol, qmhalf_vol);',
-      # sgt = 'for (n in Jobs_vol) target += sgt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], lambdap1half_vol, p_vol, q_vol);',
-      # sym_gt = 'for (n in Jobs_vol) target += sym_gt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], p_vol, q_vol);'
+      t = 'target += student_t_lpdf(Yl_vol[Jobs_vol] | nu_vol[Jobs_vol], mu_vol[Jobs_vol], sigma_vol[Jobs_vol]);',
+      st = 'for (n in Jobs_vol) target += constrained_skew_t_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], lambdap1half_vol, qmhalf_vol[n]);',
+      sgt = 'for (n in Jobs_vol) target += sgt_lpdf(Yl_vol[n] | mu_vol[n], sigma_vol[n], lambdap1half_vol, p_vol[n], q_vol[n]);'
     )
   surv.code <- '
   //mu_evdeath += (bsp_evdeath[1] + r_1_evdeath_1[J_1_evdeath]) .* (-Yl_vol) +  (bsp_evdeath[1] * exp(r_1_evdeath_1[J_1_evdeath]-r_1_evdeath_1[J_1_evdeath[1]])) .* mu_vol;
@@ -111,9 +100,8 @@ rv_stanvar = function(model_code, family, n_subject_time){
   mu_evdeath += r_1_evdeath_1[J_1_evdeath] .* (mu_vol-Yl_vol);
   
   //target += bernoulli_logit_glm_lpmf(Y_evdeath | Xc_evdeath, mu_evdeath, b_evdeath);
-  //target += surv_lpmf(Y_evdeath_subject | Xc_evdeath, mu_evdeath, b_evdeath, mu_vol, bsp_evdeath[1], n_subject_time);
-  target += surv_glm_lpmf(Y_evdeath_subject | Xc_evdeath, mu_evdeath, b_evdeath, mu_vol, bsp_evdeath[1], n_subject_time);
-  target += std_normal_lupdf(Ymi_vol);'
+  target += surv_lpmf(Y_evdeath | Xc_evdeath, mu_evdeath, b_evdeath, mu_vol, bsp_evdeath[1], n_subject_time);
+  target += std_normal_lpdf(Ymi_vol);'
   likelihood <- gsub('target += bernoulli_logit_glm_lpmf(Y_evdeath | Xc_evdeath, mu_evdeath, b_evdeath);', '', likelihood, fixed=TRUE)
   likelihood <- gsub(old_lpdf, paste(new_lpdf, surv.code, sep='\n'), likelihood, fixed=TRUE)
   likelihood <- gsub('Yl_vol[Jmi_vol] = Ymi_vol', 'Yl_vol[Jmi_vol] = mu_vol[Jmi_vol]', likelihood, fixed=TRUE)
@@ -145,10 +133,9 @@ rv_stanvar = function(model_code, family, n_subject_time){
   ll_2 <- '*/' |>  brms::stanvar(name='cancel_out', scode=_, block='likelihood', position='end')
   ll <- likelihood |> brms::stanvar(name='new', scode=_, block='likelihood', position='end')
   c(tdata_code_def, tdata_code_end, ll_1, ll_2, ll, subject_time, surv_lpmf,
-    surv_y_def, surv_y_assign)
-    # chol_param, 
+    chol_param, 
     # chol_prior,
-    # chol_z1_lpdf)
+    chol_z1_lpdf)
 }
 
 # Data -----
@@ -165,9 +152,9 @@ rv <-
 mu_cd4 <- mean(log2(rv[hiv==TRUE, cd4]), na.rm=TRUE)  
 sd_cd4 <- sd(log2(rv[hiv==TRUE, cd4]), na.rm=TRUE)
 rv <- mutate(rv,
-              weight = scale(weight) |> as.vector(),
-              csflym = scale(log10(csflym)) |> as.vector(),
-              cd4 = ifelse(hiv, (log2(cd4) - mu_cd4)/sd_cd4, 0)) |>
+             weight = scale(weight) |> as.vector(),
+             csflym = scale(log10(csflym)) |> as.vector(),
+             cd4 = ifelse(hiv, (log2(cd4) - mu_cd4)/sd_cd4, 0)) |>
   mutate(cd4 = replace_na(cd4, mu_cd4)) |>
   select(-ev_death) |>
   rename(ev_death=y) |>
@@ -204,7 +191,7 @@ surv_fml <-
        s(tstop, k = 5, by=genohiv) + 
        csflym + cd4 + arm + 
        arm:hiv + csflym:hiv ,
-       # mo(genotype) + mo(genotype):hiv, 
+     # mo(genotype) + mo(genotype):hiv, 
      family=bernoulli(link='logit')) 
 
 rv_fml <- 
@@ -221,7 +208,7 @@ rv_fml <-
          mo(mrc):mri_wk + mo(genotype):mri_wk + arm:mri_wk + hiv:mri_wk + 
          arm:mo(mrc):mri_wk + arm:mo(genotype):mri_wk + arm:hiv:mri_wk +
          arm:mo(mrc):hiv:mri_wk + arm:mo(genotype):hiv:mri_wk 
-         | gr(region, cor=FALSE)
+       | gr(region, cor=FALSE)
       )
   )
 
